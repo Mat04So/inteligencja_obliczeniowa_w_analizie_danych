@@ -4,7 +4,6 @@ import random
 import sys
 from dataclasses import dataclass
 
-# Ensure local easyAI package is importable when this script is run from the lab1 folder.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)

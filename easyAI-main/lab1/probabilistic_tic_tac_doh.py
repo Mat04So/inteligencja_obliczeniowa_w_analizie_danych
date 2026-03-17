@@ -5,7 +5,6 @@ import random
 import sys
 from copy import deepcopy
 
-# Ensure local easyAI package is importable when this script is run from the lab1 folder.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -104,11 +103,9 @@ class TicTacToe(TwoPlayerGame):
                 self.show()
 
             if missed:
-                # Miss: opponent gets the next two turns.
                 self.current_player = 2 if player_before_move == 1 else 1
                 self.double_turn_player = self.current_player
             elif self.double_turn_player == player_before_move:
-                # Keep turn once for the player who earned a double turn.
                 self.current_player = player_before_move
                 self.double_turn_player = None
             else:
