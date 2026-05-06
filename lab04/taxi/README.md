@@ -47,6 +47,7 @@ python main.py random --env v2 --seed 7 --fps 6
 python train.py                               # v1, 300 000 kroków (~70 s na CPU)
 python train.py --env v2                      # v2, 3 000 000 kroków (domyślnie)
 python train.py --env v2 --timesteps 4000000 # dłuższy trening v2
+python train.py --env v2 --n-envs 8          # szybsze uczenie (równolegle)
 ```
 
 Modele zapisują się w `models/`:

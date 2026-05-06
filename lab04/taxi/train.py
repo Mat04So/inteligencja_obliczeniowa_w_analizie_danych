@@ -2,8 +2,9 @@
 Trenowanie agenta MaskablePPO na CustomGridTaxi-v0 lub CustomGridTaxi2P-v0.
 
   python train.py                              # v1, 300k kroków
-  python train.py --env v2                     # v2 (2 pasażerów), 600k kroków
-  python train.py --env v2 --timesteps 800000  # dłuższy trening v2
+  python train.py --env v2                     # v2 (2 pasażerów), 3M kroków
+  python train.py --env v2 --timesteps 4000000 # dłuższy trening v2
+  python train.py --env v2 --n-envs 8          # równoległe środowiska
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 from sb3_contrib.common.wrappers import ActionMasker
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecMonitor
 
 
 def linear_schedule(initial_value: float):
@@ -68,7 +71,9 @@ def main() -> None:
     parser.add_argument("--env", choices=["v1", "v2"], default="v1",
                         help="v1=1 pasażer (domyślnie), v2=2 pasażerów")
     parser.add_argument("--timesteps", type=int, default=None,
-                        help="Domyślnie: 300k (v1) lub 600k (v2)")
+                        help="Domyślnie: 300k (v1) lub 3M (v2)")
+    parser.add_argument("--n-envs", type=int, default=None,
+                        help="Liczba równoległych envów (domyślnie: 1 dla v1, 8 dla v2)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--model-dir",
@@ -78,16 +83,26 @@ def main() -> None:
     args = parser.parse_args()
 
     default_steps = {"v1": 300_000, "v2": 3_000_000}
+    default_n_envs = {"v1": 1, "v2": 8}
     timesteps = args.timesteps or default_steps[args.env]
+    n_envs = args.n_envs or default_n_envs[args.env]
     suffix = "" if args.env == "v1" else "_v2"
 
-    print(f"Środowisko: {args.env}  |  timesteps: {timesteps:,}  |  seed: {args.seed}")
+    print(
+        f"Środowisko: {args.env}  |  timesteps: {timesteps:,}  |  "
+        f"n_envs: {n_envs}  |  seed: {args.seed}"
+    )
 
     base_env = _make_base_env(args.env)
     check_env(base_env, warn=True)
     base_env.close()
 
-    train_env = Monitor(make_masked_env(args.env))
+    train_env = make_vec_env(
+        lambda: make_masked_env(args.env),
+        n_envs=n_envs,
+        seed=args.seed,
+    )
+    train_env = VecMonitor(train_env)
     eval_env = Monitor(make_masked_env(args.env))
 
     args.model_dir.mkdir(parents=True, exist_ok=True)
@@ -98,11 +113,12 @@ def main() -> None:
     final_path = args.model_dir / f"custom_grid_taxi_ppo{suffix}.zip"
 
     n_eval_episodes = 30 if args.env == "v2" else 15
+    eval_freq = max(2000, timesteps // (25 * n_envs))
     eval_callback = MaskableEvalCallback(
         eval_env,
         best_model_save_path=str(best_dir),
         log_path=str(args.model_dir / f"logs{suffix}"),
-        eval_freq=max(5000, timesteps // 20),
+        eval_freq=eval_freq,
         n_eval_episodes=n_eval_episodes,
         deterministic=True,
         render=False,
