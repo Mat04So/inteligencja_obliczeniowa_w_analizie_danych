@@ -44,9 +44,9 @@ python main.py random --env v2 --seed 7 --fps 6
 ### Trening agenta
 
 ```bash
-python train.py                              # v1, 300 000 kroków (~70 s na CPU)
-python train.py --env v2                     # v2, 600 000 kroków
-python train.py --env v2 --timesteps 800000  # dłuższy trening v2
+python train.py                               # v1, 300 000 kroków (~70 s na CPU)
+python train.py --env v2                      # v2, 3 000 000 kroków (domyślnie)
+python train.py --env v2 --timesteps 4000000 # dłuższy trening v2
 ```
 
 Modele zapisują się w `models/`:
@@ -100,7 +100,7 @@ python main.py eval   --env v2 --fps 5 --seed 3
 
 # --- trening od zera ---
 python train.py                        # v1, 300k kroków (~70s)
-python train.py --env v2               # v2, 1M kroków (~4 min)
+python train.py --env v2               # v2, 3M kroków (domyślnie)
 ```
 
 ### Co widać w oknie pygame

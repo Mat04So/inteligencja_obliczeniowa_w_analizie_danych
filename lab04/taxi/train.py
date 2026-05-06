@@ -19,6 +19,13 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
 
 
+def linear_schedule(initial_value: float):
+    """Linear learning-rate schedule used mostly for v2."""
+    def _schedule(progress_remaining: float) -> float:
+        return float(progress_remaining) * initial_value
+    return _schedule
+
+
 def _make_base_env(env_ver: str, render_mode: str | None = None) -> gym.Env:
     if env_ver == "v1":
         from custom_grid_taxi_env import ENV_ID, register_custom_grid_taxi
@@ -70,7 +77,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    default_steps = {"v1": 300_000, "v2": 1_000_000}
+    default_steps = {"v1": 300_000, "v2": 3_000_000}
     timesteps = args.timesteps or default_steps[args.env]
     suffix = "" if args.env == "v1" else "_v2"
 
@@ -90,31 +97,43 @@ def main() -> None:
     best_path = best_dir / "best_model.zip"
     final_path = args.model_dir / f"custom_grid_taxi_ppo{suffix}.zip"
 
+    n_eval_episodes = 30 if args.env == "v2" else 15
     eval_callback = MaskableEvalCallback(
         eval_env,
         best_model_save_path=str(best_dir),
         log_path=str(args.model_dir / f"logs{suffix}"),
         eval_freq=max(5000, timesteps // 20),
-        n_eval_episodes=15,
+        n_eval_episodes=n_eval_episodes,
         deterministic=True,
         render=False,
     )
     _default_best = best_dir / "best_model.zip"
 
-    ent_coef = 0.02 if args.env == "v2" else 0.0
-    policy_kwargs = dict(net_arch=[256, 256]) if args.env == "v2" else {}
-    model = MaskablePPO(
-        "MlpPolicy",
-        train_env,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=256,
-        gamma=0.99,
-        ent_coef=ent_coef,
-        policy_kwargs=policy_kwargs or None,
-        verbose=1,
-        seed=args.seed,
-    )
+    if args.env == "v2":
+        # v2 ma rzadszy sygnał nagrody i większą przestrzeń stanu:
+        # ustawienia poniżej stabilizują i wydłużają uczenie.
+        ppo_kwargs = dict(
+            learning_rate=linear_schedule(3e-4),
+            n_steps=1024,
+            batch_size=256,
+            gamma=0.995,
+            gae_lambda=0.98,
+            clip_range=0.15,
+            ent_coef=0.005,
+            target_kl=0.03,
+            policy_kwargs=dict(net_arch=[256, 256, 128]),
+        )
+    else:
+        ppo_kwargs = dict(
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=256,
+            gamma=0.99,
+            ent_coef=0.0,
+            policy_kwargs=None,
+        )
+
+    model = MaskablePPO("MlpPolicy", train_env, verbose=1, seed=args.seed, **ppo_kwargs)
     model.learn(total_timesteps=timesteps, callback=eval_callback)
     model.save(final_path)
     print(f"Zapisano model: {final_path}")
