@@ -27,7 +27,7 @@ This variation instead pre-allocates a "list of states" to avoid recursion. For 
 DUAL
 ----
 
-A variation of the Monte-Carlo Tree search algorithm described by L. W. Zhang and S. X. He, *The convergence of a dual algorithm for nonlinear programming*, Korean J. Comput. & Appl. Math.7 (2000), 487–506.
+A variation of the Monte-Carlo Tree search algorithm described by L. W. Zhang and S. X. He, *The convergence of a dual algorithm for nonlinear programming*, Korean J. Comput. & Appl. Math.7 (2000), 487-506.
 
 SSS*
 ----

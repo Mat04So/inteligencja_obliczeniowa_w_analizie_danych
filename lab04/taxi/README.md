@@ -1,10 +1,10 @@
-# Lab 04 — własne środowisko Gymnasium
+# Lab 04 - własne środowisko Gymnasium
 
 Dwa środowiska na siatce 5×5, agent: **MaskablePPO** (Stable Baselines3 + sb3-contrib).
 
 | Wersja | ID                    | Opis                                                        |
 | ------ | --------------------- | ----------------------------------------------------------- |
-| **v1** | `CustomGridTaxi-v0`   | 1 pasażer, obserwacja dyskretna (0–499)                     |
+| **v1** | `CustomGridTaxi-v0`   | 1 pasażer, obserwacja dyskretna (0-499)                     |
 | **v2** | `CustomGridTaxi2P-v0` | 2 pasażerów, taxi wiezie jednego naraz, obserwacja Box(12,) |
 
 ## Wymagania
@@ -71,17 +71,17 @@ python main.py eval --render ansi            # bez okna, ASCII
 ## Uwagi
 
 - Pierwsze uruchomienie `eval` wymaga wcześniejszego `python train.py` (albo gotowych plików w `models/`).
-- v1 używa obserwacji **dyskretnej** (indeks 0–499). Tryb wektorowy dostępny przez `observation_mode="vector"` — do eksperymentów w raporcie.
+- v1 używa obserwacji **dyskretnej** (indeks 0-499). Tryb wektorowy dostępny przez `observation_mode="vector"` - do eksperymentów w raporcie.
 - v2 używa wektorowej obserwacji **Box(12,)**: pozycja taxi, status i współrzędne src/dst każdego pasażera.
 - Nagrody v2: **+20** za pierwszą dostawę, **+30** za drugą (bonus za ukończenie misji), **−1** za krok.
 - Tryby renderowania: `ansi`, `human` (pygame) oraz `rgb_array` (klatka jako `np.ndarray (H,W,3)`).
-- Trening nie otwiera okna graficznego — szybciej, działa też na SSH. Wizualizację uruchomisz przez `main.py eval`.
+- Trening nie otwiera okna graficznego - szybciej, działa też na SSH. Wizualizację uruchomisz przez `main.py eval`.
 
 ---
 
-## 8. Wizualizacja graficzna — uruchamianie przez terminal
+## 8. Wizualizacja graficzna - uruchamianie przez terminal
 
-> Poniższe komendy uruchamiamy **w terminalu**, nie w notebooku — pygame wymaga własnego okna.
+> Poniższe komendy uruchamiamy **w terminalu**, nie w notebooku - pygame wymaga własnego okna.
 
 ```bash
 # przejdź do katalogu projektu i aktywuj środowisko

@@ -1,6 +1,12 @@
 gymnasium>=0.29.0
-numpy>=1.23
+# NumPy 2.x jest OK dla aktualnego SB3/Gymnasium; unikaj współdzielenia jednego
+# globalnego site-packages z pakietami typu manim (tam często numpy>=2 vs SB3 - rozwiązanie: venv).
+numpy>=1.26,<3
 stable-baselines3>=2.0.0
 sb3-contrib>=2.0.0
 torch>=2.0.0
+sb3-contrib>=2.0.0
+torch>=2.0.0
+# SB3 importuje torch.utils.tensorboard; spójny tensorboard usuwa błędy compat/notf i ciągnięcie TF
+tensorboard>=2.14,<3
 pygame>=2.5.0

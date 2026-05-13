@@ -1,10 +1,11 @@
 """
-Własne środowisko Gymnasium: taxi na siatce 5×5 z DWOMA pasażerami.
+Własne środowisko Gymnasium: taxi na konfigurowalnej siatce (domyślnie 20×20)
+z DWOMA pasażerami - ta sama topologia co CustomGridTaxi-v0 (otwarta krata, R G Y B w rogach).
 
 Agent musi odebrać każdego pasażera z jego lokacji i dowieźć do celu.
 Taxi przewozi jednego pasażera naraz, kolejność dowolna.
 
-Obserwacja: Box(12,) — wektor znormalizowany do [0, 1].
+Obserwacja: Box(12,) - wektor znormalizowany do [0, 1].
 Nagrody: +20 za pierwszą dostawę, +30 za drugą (bonus za ukończenie).
 """
 
@@ -18,17 +19,8 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces, utils
 
-MAP = [
-    "+---------+",
-    "|R: | : :G|",
-    "| : | : : |",
-    "| : : : : |",
-    "| | : | : |",
-    "|Y| : |B: |",
-    "+---------+",
-]
+from custom_grid_taxi_env import DEFAULT_GRID_SIZE, _build_open_grid_map
 
-LOCS: list[tuple[int, int]] = [(0, 0), (0, 4), (4, 0), (4, 3)]
 LOC_NAMES = ["R", "G", "Y", "B"]
 
 ENV_ID_2P = "CustomGridTaxi2P-v0"
@@ -42,8 +34,8 @@ class CustomGridTaxi2PEnv(gym.Env):
     """
     Rozszerzona wersja CustomGridTaxi z dwoma pasażerami.
 
-    Stan: pozycja taxi (5×5), status P1 i P2 (waiting/in_taxi/delivered),
-          lokacje startowe i docelowe obu pasażerów (przypisane przez permutację 4 LOCS).
+    Stan: pozycja taxi (grid_size×grid_size), status P1 i P2 (waiting/in_taxi/delivered),
+          lokacje startowe i docelowe obu pasażerów (przypisane przez permutację 4 przystanków).
 
     Obserwacja: np.ndarray shape=(12,), dtype=float32, wszystko w [0, 1]:
         [taxi_r, taxi_c, p1_status, p1_src_r, p1_src_c, p1_dst_r, p1_dst_c,
@@ -52,12 +44,18 @@ class CustomGridTaxi2PEnv(gym.Env):
 
     metadata = {"render_modes": ["ansi", "human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, render_mode: str | None = None):
+    def __init__(
+        self,
+        render_mode: str | None = None,
+        grid_size: int = DEFAULT_GRID_SIZE,
+    ):
         super().__init__()
         self.render_mode = render_mode
-        self.desc = np.asarray(MAP, dtype="c")
-        self.max_row = 4
-        self.max_col = 4
+        self.grid_size = int(grid_size)
+        map_lines, self.locs = _build_open_grid_map(self.grid_size)
+        self.desc = np.asarray(map_lines, dtype="c")
+        self.max_row = self.grid_size - 1
+        self.max_col = self.grid_size - 1
         self.last_action: int | None = None
         self.steps = 0
         self.episode_reward = 0.0
@@ -78,10 +76,11 @@ class CustomGridTaxi2PEnv(gym.Env):
         self.p1_status = 0
         self.p2_status = 0
 
-        self._cell = 96
+        gs = self.grid_size
+        self._cell = max(20, min(96, 1400 // gs))
         self._hud_h = 112
-        self._win_w = self._cell * 5
-        self._win_h = self._cell * 5 + self._hud_h
+        self._win_w = self._cell * gs
+        self._win_h = self._cell * gs + self._hud_h
         self._pygame = None
         self._window = None
         self._clock = None
@@ -108,8 +107,8 @@ class CustomGridTaxi2PEnv(gym.Env):
             # status 2 (delivered): wszystko = 0
             if status == 2:
                 return 1.0, 0.0, 0.0, 0.0, 0.0
-            sr, sc = LOCS[src]
-            dr, dc = LOCS[dst]
+            sr, sc = self.locs[src]
+            dr, dc = self.locs[dst]
             src_r = sr / mr if status == 0 else 0.0
             src_c = sc / mc if status == 0 else 0.0
             return status / 2.0, src_r, src_c, dr / mr, dc / mc
@@ -139,15 +138,15 @@ class CustomGridTaxi2PEnv(gym.Env):
 
         # pickup: tylko gdy puste taxi i przy czekającym pasażerze
         if carrying == 0:
-            if self.p1_status == 0 and taxi_loc == LOCS[self.p1_src]:
+            if self.p1_status == 0 and taxi_loc == self.locs[self.p1_src]:
                 mask[4] = 1
-            if self.p2_status == 0 and taxi_loc == LOCS[self.p2_src]:
+            if self.p2_status == 0 and taxi_loc == self.locs[self.p2_src]:
                 mask[4] = 1
 
         # dropoff: tylko gdy wieziony pasażer jest przy swoim celu
-        if carrying == 1 and taxi_loc == LOCS[self.p1_dst]:
+        if carrying == 1 and taxi_loc == self.locs[self.p1_dst]:
             mask[5] = 1
-        if carrying == 2 and taxi_loc == LOCS[self.p2_dst]:
+        if carrying == 2 and taxi_loc == self.locs[self.p2_dst]:
             mask[5] = 1
 
         return mask
@@ -169,8 +168,8 @@ class CustomGridTaxi2PEnv(gym.Env):
         perm = self.np_random.permutation(4).tolist()
         self.p1_src, self.p1_dst, self.p2_src, self.p2_dst = perm
 
-        self.taxi_row = int(self.np_random.integers(0, 5))
-        self.taxi_col = int(self.np_random.integers(0, 5))
+        self.taxi_row = int(self.np_random.integers(0, self.grid_size))
+        self.taxi_col = int(self.np_random.integers(0, self.grid_size))
         self.p1_status = 0
         self.p2_status = 0
         self.last_action = None
@@ -200,10 +199,10 @@ class CustomGridTaxi2PEnv(gym.Env):
             taxi_loc = (r, c)
             carrying = self._carrying()
             if carrying == 0:
-                if self.p1_status == 0 and taxi_loc == LOCS[self.p1_src]:
+                if self.p1_status == 0 and taxi_loc == self.locs[self.p1_src]:
                     self.p1_status = 1
                     reward = 5.0
-                elif self.p2_status == 0 and taxi_loc == LOCS[self.p2_src]:
+                elif self.p2_status == 0 and taxi_loc == self.locs[self.p2_src]:
                     self.p2_status = 1
                     reward = 5.0
                 else:
@@ -213,11 +212,11 @@ class CustomGridTaxi2PEnv(gym.Env):
         elif action == 5:  # dropoff
             taxi_loc = (r, c)
             carrying = self._carrying()
-            if carrying == 1 and taxi_loc == LOCS[self.p1_dst]:
+            if carrying == 1 and taxi_loc == self.locs[self.p1_dst]:
                 self.p1_status = 2
                 self._deliveries += 1
                 reward = 30.0 if self._deliveries == 2 else 20.0
-            elif carrying == 2 and taxi_loc == LOCS[self.p2_dst]:
+            elif carrying == 2 and taxi_loc == self.locs[self.p2_dst]:
                 self.p2_status = 2
                 self._deliveries += 1
                 reward = 30.0 if self._deliveries == 2 else 20.0
@@ -275,19 +274,19 @@ class CustomGridTaxi2PEnv(gym.Env):
         )
 
         if self.p1_status == 0:
-            pr, pc = LOCS[self.p1_src]
+            pr, pc = self.locs[self.p1_src]
             out[1 + pr][2 * pc + 1] = utils.colorize(
                 out[1 + pr][2 * pc + 1], "blue", bold=True
             )
         if self.p2_status == 0:
-            pr, pc = LOCS[self.p2_src]
+            pr, pc = self.locs[self.p2_src]
             out[1 + pr][2 * pc + 1] = utils.colorize(
                 out[1 + pr][2 * pc + 1], "cyan", bold=True
             )
 
-        dr, dc = LOCS[self.p1_dst]
+        dr, dc = self.locs[self.p1_dst]
         out[1 + dr][2 * dc + 1] = utils.colorize(out[1 + dr][2 * dc + 1], "magenta")
-        dr, dc = LOCS[self.p2_dst]
+        dr, dc = self.locs[self.p2_dst]
         out[1 + dr][2 * dc + 1] = utils.colorize(out[1 + dr][2 * dc + 1], "magenta")
 
         outfile.write("\n".join(["".join(row) for row in out]) + "\n")
@@ -334,21 +333,22 @@ class CustomGridTaxi2PEnv(gym.Env):
         pygame = self._pygame
         canvas = self._window
         cs = self._cell
+        gs = self.grid_size
 
         canvas.fill((250, 250, 252))
 
         grid_bg = (245, 245, 248)
         grid_line = (210, 210, 218)
-        for row in range(5):
-            for col in range(5):
+        for row in range(gs):
+            for col in range(gs):
                 pygame.draw.rect(canvas, grid_bg, (col * cs, row * cs, cs, cs))
                 pygame.draw.rect(canvas, grid_line, (col * cs, row * cs, cs, cs), 1)
 
         wall_col = (35, 35, 45)
         wall_w = 5
-        pygame.draw.rect(canvas, wall_col, (0, 0, self._win_w, cs * 5), wall_w)
-        for row in range(5):
-            for col in range(4):
+        pygame.draw.rect(canvas, wall_col, (0, 0, self._win_w, cs * gs), wall_w)
+        for row in range(gs):
+            for col in range(gs - 1):
                 if self.desc[1 + row, 2 * col + 2] == b"|":
                     x = (col + 1) * cs
                     pygame.draw.line(canvas, wall_col, (x, row * cs), (x, (row + 1) * cs), wall_w)
@@ -361,14 +361,14 @@ class CustomGridTaxi2PEnv(gym.Env):
             ]
         ):
             if p_status < 2:
-                dr, dc = LOCS[p_dst]
+                dr, dc = self.locs[p_dst]
                 frame = pygame.Rect(dc * cs + 5, dr * cs + 5, cs - 10, cs - 10)
                 pygame.draw.rect(canvas, dst_col, frame, 4, border_radius=8)
                 lbl = self._fonts["s"].render(f"P{p_i + 1}", True, dst_col)
                 canvas.blit(lbl, (dc * cs + cs - lbl.get_width() - 6, dr * cs + cs - lbl.get_height() - 4))
 
         # Loc name labels (always visible)
-        for i, (lr, lc) in enumerate(LOCS):
+        for i, (lr, lc) in enumerate(self.locs):
             lbl = self._fonts["b"].render(LOC_NAMES[i], True, (160, 160, 170))
             canvas.blit(lbl, (lc * cs + 6, lr * cs + 4))
 
@@ -380,7 +380,7 @@ class CustomGridTaxi2PEnv(gym.Env):
             ]
         ):
             if p_status == 0:
-                pr, pc = LOCS[p_src]
+                pr, pc = self.locs[p_src]
                 cx = pc * cs + cs // 2
                 cy = pr * cs + cs // 2 + cs // 8
                 pygame.draw.circle(canvas, p_color, (cx, cy + 6), cs // 8)
@@ -405,15 +405,15 @@ class CustomGridTaxi2PEnv(gym.Env):
         canvas.blit(t_lbl, t_lbl.get_rect(center=(taxi_rect.centerx, taxi_rect.centery + taxi_rect.h // 4)))
 
         # HUD
-        hud = pygame.Rect(0, cs * 5, self._win_w, self._hud_h)
+        hud = pygame.Rect(0, cs * gs, self._win_w, self._hud_h)
         pygame.draw.rect(canvas, (25, 25, 33), hud)
-        pygame.draw.line(canvas, wall_col, (0, cs * 5), (self._win_w, cs * 5), wall_w)
+        pygame.draw.line(canvas, wall_col, (0, cs * gs), (self._win_w, cs * gs), wall_w)
 
         status_names = ["czeka", "w taxi", "✓"]
         p1_str = f"P1 {LOC_NAMES[self.p1_src]}→{LOC_NAMES[self.p1_dst]}: {status_names[self.p1_status]}"
         p2_str = f"P2 {LOC_NAMES[self.p2_src]}→{LOC_NAMES[self.p2_dst]}: {status_names[self.p2_status]}"
         action_names = ["South", "North", "East", "West", "Pickup", "Dropoff"]
-        last = action_names[self.last_action] if self.last_action is not None else "—"
+        last = action_names[self.last_action] if self.last_action is not None else "-"
         hud_lines = [
             (p1_str, P_DST_COLORS[0]),
             (p2_str, P_DST_COLORS[1]),
@@ -421,7 +421,7 @@ class CustomGridTaxi2PEnv(gym.Env):
         ]
         for i, (text, color) in enumerate(hud_lines):
             surf = self._fonts["s"].render(text, True, color)
-            canvas.blit(surf, (12, cs * 5 + 10 + i * 24))
+            canvas.blit(surf, (12, cs * gs + 10 + i * 24))
 
         if self.render_mode == "human":
             pygame.display.flip()
@@ -435,10 +435,12 @@ class CustomGridTaxi2PEnv(gym.Env):
 def register_custom_grid_taxi2p() -> None:
     if ENV_ID_2P in gym.registry:
         return
+    gs = DEFAULT_GRID_SIZE
     gym.register(
         id=ENV_ID_2P,
         entry_point="custom_grid_taxi2p_env:CustomGridTaxi2PEnv",
-        max_episode_steps=400,
+        kwargs={"grid_size": gs},
+        max_episode_steps=max(2500, gs * gs * 6),
     )
 
 

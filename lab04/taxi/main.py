@@ -1,15 +1,16 @@
 """
-Lab 04 — własne środowisko Gymnasium + demonstracja / ewaluacja agenta.
+Lab 04 - własne środowisko Gymnasium + demonstracja / ewaluacja agenta.
 
 Uruchomienie:
-  python main.py random                        # v1, okno pygame
-  python main.py random --env v2               # 2 pasażerów
-  python main.py eval [--model PATH]           # agent MaskablePPO (v1)
-  python main.py eval --env v2                 # agent MaskablePPO (v2)
+  python main.py random                        # 10×10 ze ścianami i losowymi R/G/Y/B
+  python main.py eval [--model PATH]           # agent MaskablePPO, random locs, obs vector
   python main.py random --render ansi          # tryb tekstowy
+  python main.py eval --grid-size 10           # jawny rozmiar siatki
 Trening:
   python train.py
-  python train.py --env v2 --timesteps 600000
+
+Uwaga: aplikacja oczekuje modelu wytrenowanego z losowymi R/G/Y/B i ``observation_mode="vector"``.
+Po zmianie wariantu uruchom trening od nowa.
 """
 
 from __future__ import annotations
@@ -24,22 +25,31 @@ from sb3_contrib import MaskablePPO
 from sb3_contrib.common.wrappers import ActionMasker
 
 ACTIONS = {0: "south", 1: "north", 2: "east", 3: "west", 4: "pickup", 5: "dropoff"}
+DEFAULT_APP_GRID_SIZE = 10
+DEFAULT_MAX_EPISODE_STEPS = 250
+APP_OBSERVATION_MODE = "vector"
 
-_DEFAULT_MODELS = {
-    "v1": "models/v1/best_model.zip",
-    "v2": "models/v2/best_model.zip",
-}
+_DEFAULT_MODEL = "models/v1_10x10_walls_random_locs_vector/best_model.zip"
 
 
-def make_env(env_ver: str, render_mode: str | None) -> gym.Env:
-    if env_ver == "v1":
-        from custom_grid_taxi_env import ENV_ID, register_custom_grid_taxi
-        register_custom_grid_taxi()
-        return gym.make(ENV_ID, render_mode=render_mode)
-    else:
-        from custom_grid_taxi2p_env import ENV_ID_2P, register_custom_grid_taxi2p
-        register_custom_grid_taxi2p()
-        return gym.make(ENV_ID_2P, render_mode=render_mode)
+def make_env(render_mode: str | None, grid_size: int = DEFAULT_APP_GRID_SIZE) -> gym.Env:
+    from custom_grid_taxi_env import ENV_ID, register_custom_grid_taxi
+
+    gs = int(grid_size)
+    register_custom_grid_taxi()
+    return gym.make(
+        ENV_ID,
+        render_mode=render_mode,
+        grid_size=gs,
+        observation_mode=APP_OBSERVATION_MODE,
+        max_episode_steps=DEFAULT_MAX_EPISODE_STEPS if gs == 10 else max(250, gs * gs * 2),
+    )
+
+
+def _space_signature(space: gym.Space) -> tuple[str, object]:
+    if hasattr(space, "n"):
+        return ("discrete", int(space.n))
+    return ("box", tuple(getattr(space, "shape", ())))
 
 
 def _show_frame(env: gym.Env, render: str, header: str | None = None) -> None:
@@ -63,13 +73,13 @@ def _hold_window(env: gym.Env, render: str, seconds: float) -> None:
 
 
 def run_random_episode(
-    env_ver: str = "v1",
     seed: int = 42,
     max_steps: int = 400,
     render: str = "human",
     fps: int = 4,
+    grid_size: int = DEFAULT_APP_GRID_SIZE,
 ) -> None:
-    env = make_env(env_ver, render)
+    env = make_env(render, grid_size)
     if render == "human":
         env.unwrapped.metadata["render_fps"] = fps
     obs, info = env.reset(seed=seed)
@@ -103,30 +113,40 @@ def run_random_episode(
 
 
 def run_trained_episode(
-    env_ver: str = "v1",
     model_path: Path | None = None,
     seed: int = 42,
     max_steps: int = 400,
     render: str = "human",
     fps: int = 4,
+    grid_size: int = DEFAULT_APP_GRID_SIZE,
 ) -> None:
     if model_path is None:
-        model_path = Path(__file__).resolve().parent / _DEFAULT_MODELS[env_ver]
+        model_path = Path(__file__).resolve().parent / _DEFAULT_MODEL
 
     if not model_path.is_file():
         raise SystemExit(
             f"Brak modelu: {model_path}\n"
-            f"Najpierw uruchom: python train.py{'  --env ' + env_ver if env_ver != 'v1' else ''}"
+            "Najpierw uruchom: python train.py"
         )
 
-    env = ActionMasker(make_env(env_ver, render), lambda e: e.unwrapped.action_masks())
+    env = ActionMasker(make_env(render, grid_size), lambda e: e.unwrapped.action_masks())
     if render == "human":
         env.unwrapped.metadata["render_fps"] = fps
     model = MaskablePPO.load(model_path)
+    if _space_signature(model.observation_space) != _space_signature(env.observation_space):
+        env.close()
+        raise SystemExit(
+            "Model ma inną przestrzeń obserwacji niż aplikacja.\n"
+            f"Model: {model.observation_space}, env: {env.observation_space}\n"
+            "Wytrenuj model od nowa: python train.py"
+        )
 
     obs, _ = env.reset(seed=seed)
     print(f"== Agent MaskablePPO ({env.unwrapped.spec.id}) ==")
-    print(f"Model: {model_path}    seed={seed}")
+    print(
+        f"Model: {model_path}    seed={seed}    "
+        f"siatka={grid_size}×{grid_size} walls random-locs    obs={APP_OBSERVATION_MODE}"
+    )
     _show_frame(env, render)
 
     total_reward = 0.0
@@ -137,7 +157,10 @@ def run_trained_episode(
         obs, reward, terminated, truncated, _ = env.step(int(action))
         total_reward += reward
         if render == "ansi":
-            print(f"\nStep {step} | action={int(action)} ({ACTIONS[int(action)]}) | r={reward}")
+            print(
+                f"\nStep {step} | action={int(action)} "
+                f"({ACTIONS[int(action)]}) | r={reward}"
+            )
         _show_frame(env, render)
         if terminated or truncated:
             print(f"Step {step}: koniec epizodu (terminated={terminated}, truncated={truncated})")
@@ -149,7 +172,9 @@ def run_trained_episode(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Lab 04 — CustomGridTaxi")
+    parser = argparse.ArgumentParser(
+        description="Lab 04 - CustomGridTaxi-v0, jeden pasażer"
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     for name, help_text in [
@@ -157,28 +182,45 @@ def main() -> None:
         ("eval", "Epizod z wytrenowanym MaskablePPO"),
     ]:
         p = sub.add_parser(name, help=help_text)
-        p.add_argument("--env", choices=["v1", "v2"], default="v1",
-                       help="v1=1 pasażer (domyślnie), v2=2 pasażerów")
         p.add_argument("--seed", type=int, default=42)
         p.add_argument("--render", choices=["human", "ansi"], default="human",
                        help="human=okno pygame (domyślne), ansi=ASCII")
         p.add_argument("--fps", type=int, default=4)
+        p.add_argument(
+            "--grid-size",
+            type=int,
+            default=DEFAULT_APP_GRID_SIZE,
+            help="Bok siatki kwadratowej (domyślnie 10; ściany aktywne dla 10×10)",
+        )
+        p.add_argument("--max-steps", type=int, default=400)
         if name == "eval":
-            p.add_argument("--model", type=Path, default=None,
-                           help="Ścieżka do modelu (domyślnie wg --env)")
+            p.add_argument(
+                "--model",
+                type=Path,
+                default=None,
+                help=(
+                    "Ścieżka do modelu "
+                    "(domyślnie models/v1_10x10_walls_random_locs_vector/best_model.zip)"
+                ),
+            )
 
     args = parser.parse_args()
     if args.cmd == "random":
         run_random_episode(
-            env_ver=args.env, seed=args.seed, render=args.render, fps=args.fps
+            seed=args.seed,
+            max_steps=args.max_steps,
+            render=args.render,
+            fps=args.fps,
+            grid_size=args.grid_size,
         )
     elif args.cmd == "eval":
         run_trained_episode(
-            env_ver=args.env,
             model_path=getattr(args, "model", None),
             seed=args.seed,
+            max_steps=args.max_steps,
             render=args.render,
             fps=args.fps,
+            grid_size=args.grid_size,
         )
 
 

@@ -1,10 +1,19 @@
 """
-Własne środowisko Gymnasium: taxi na siatce 5×5 z przeszkodami (jak problem Diettericha),
-zaimplementowane od zera — nie jest to podklasa gymnasium.envs.toy_text.taxi.TaxiEnv.
+Własne środowisko Gymnasium: taxi na siatce 10×10 z przeszkodami.
+Cztery przystanki R, G, Y, B są losowane na wolnych polach mapy przy resecie.
+
+Zaimplementowane od zera - nie jest to podklasa gymnasium.envs.toy_text.taxi.TaxiEnv.
+
+Opcjonalny **bonus za zbliżanie się** (``distance_bonus_scale > 0``): przy ruchu N/S/E/W
+dodawana jest ``scale * (d_stare - d_nowe)`` względem najkrótszej ścieżki BFS
+do aktualnego celu (pozycja odbioru albo cel dostawy), co przyspiesza uczenie.
+Poprawny pickup/dropoff daje dodatnią nagrodę, a dropoff jest maskowany tylko
+przy właściwym celu pasażera.
 """
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import closing
 from io import StringIO
 from typing import Any, Literal
@@ -13,26 +22,75 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces, utils
 
-MAP = [
-    "+---------+",
-    "|R: | : :G|",
-    "| : | : : |",
-    "| : : : : |",
-    "| | : | : |",
-    "|Y| : |B: |",
-    "+---------+",
-]
-
-LOCS: list[tuple[int, int]] = [(0, 0), (0, 4), (4, 0), (4, 3)]
-
 ENV_ID = "CustomGridTaxi-v0"
+
+DEFAULT_GRID_SIZE = 10
+DEFAULT_MAX_EPISODE_STEPS = 250
+DEFAULT_BLOCKED_CELLS_10X10 = frozenset(
+    {
+        (1, 3),
+        (2, 3),
+        (3, 3),
+        (4, 3),
+        (6, 3),
+        (7, 3),
+        (8, 3),
+        (1, 6),
+        (2, 6),
+        (4, 6),
+        (5, 6),
+        (6, 6),
+        (8, 6),
+        (5, 1),
+        (5, 2),
+        (5, 7),
+        (5, 8),
+    }
+)
+
+
+def _default_blocked_cells(n: int) -> frozenset[tuple[int, int]]:
+    """Stała mapa przeszkód dla zadania treningowego 10×10."""
+    if n == 10:
+        return DEFAULT_BLOCKED_CELLS_10X10
+    return frozenset()
+
+
+def _build_open_grid_map(
+    n: int,
+    blocked_cells: set[tuple[int, int]] | frozenset[tuple[int, int]] | None = None,
+    draw_corner_locs: bool = True,
+) -> tuple[list[bytes], list[tuple[int, int]]]:
+    """Mapa ASCII jak w toy_text taxi: otwarte przejścia, przeszkody jako zablokowane pola."""
+    if n < 2:
+        raise ValueError("grid_size musi być >= 2 (potrzebne są 4 rozróżnialne rogi).")
+    blocked = blocked_cells or frozenset()
+    locs = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
+    letters = ["R", "G", "Y", "B"]
+    cells = [[" " for _ in range(n)] for _ in range(n)]
+    for r, c in blocked:
+        if (r, c) in locs:
+            raise ValueError("Przeszkoda nie może blokować przystanku w rogu mapy.")
+        cells[r][c] = "#"
+    if draw_corner_locs:
+        for (r, c), ch in zip(locs, letters, strict=True):
+            cells[r][c] = ch
+
+    topbot = ("+" + "-" * (2 * n - 1) + "+").encode("ascii")
+    lines: list[bytes] = [topbot]
+    for r in range(n):
+        inner = "".join(cells[r][c] + (":" if c < n - 1 else "") for c in range(n))
+        lines.append(("|" + inner + "|").encode("ascii"))
+    lines.append(topbot)
+    return lines, locs
 
 
 class CustomGridTaxiEnv(gym.Env):
     """
     Taksówka zbiera pasażera w jednym z czterech punktów (R,G,Y,B) i dowozi do wylosowanego celu.
-    Obserwacja (domyślnie): indeks stanu 0..499 (jak w klasycznym Taxi-v3), wygodny dla PPO/DQN.
-    Opcjonalnie: wektor znormalizowany (``observation_mode="vector"``) do eksperymentów.
+
+    Domyślnie siatka ``grid_size``×``grid_size`` (10×10), przystanki losowane na wolnych polach.
+    Obserwacja domyślna: bogatszy wektor znormalizowany (``observation_mode="vector"``).
     """
 
     metadata = {"render_modes": ["ansi", "human", "rgb_array"], "render_fps": 4}
@@ -40,35 +98,66 @@ class CustomGridTaxiEnv(gym.Env):
     def __init__(
         self,
         render_mode: str | None = None,
-        observation_mode: Literal["discrete", "vector"] = "discrete",
+        observation_mode: Literal["discrete", "vector"] = "vector",
+        grid_size: int = DEFAULT_GRID_SIZE,
+        distance_bonus_scale: float = 2.0,
+        randomize_locations: bool = True,
     ):
         super().__init__()
         self.render_mode = render_mode
         self.observation_mode = observation_mode
-        self.desc = np.asarray(MAP, dtype="c")
-        self.max_row = 4
-        self.max_col = 4
+        self.grid_size = int(grid_size)
+        self.distance_bonus_scale = float(distance_bonus_scale)
+        self.randomize_locations = bool(randomize_locations)
+        self.blocked_cells = set(_default_blocked_cells(self.grid_size))
+        map_lines, self.locs = _build_open_grid_map(
+            self.grid_size,
+            self.blocked_cells,
+            draw_corner_locs=not self.randomize_locations,
+        )
+        self.desc = np.asarray(map_lines, dtype="c")
+        self.max_row = self.grid_size - 1
+        self.max_col = self.grid_size - 1
+        self._n_states_taxi = self.grid_size * self.grid_size
+        self._discrete_n = self._n_states_taxi * 5 * 4
+        self._open_cells = [
+            (r, c)
+            for r in range(self.grid_size)
+            for c in range(self.grid_size)
+            if (r, c) not in self.blocked_cells
+        ]
+        self._distance_maps = {
+            cell: self._bfs_distances(cell)
+            for cell in self._open_cells
+        }
+        self._max_bfs_distance = max(
+            dist
+            for dist_map in self._distance_maps.values()
+            for dist in dist_map.values()
+        )
         self.last_action: int | None = None
         self.steps = 0
         self.episode_reward = 0.0
 
         self.action_space = spaces.Discrete(6)
         if observation_mode == "discrete":
-            self.observation_space = spaces.Discrete(500)
+            self.observation_space = spaces.Discrete(self._discrete_n)
         else:
             self.observation_space = spaces.Box(
-                low=0.0, high=1.0, shape=(4,), dtype=np.float32
+                low=0.0, high=1.0, shape=(10,), dtype=np.float32
             )
 
         self.taxi_row = 0
         self.taxi_col = 0
         self.passenger_idx = 0
+        self.passenger_start_idx = 0
         self.destination_idx = 0
 
-        self._cell = 96
+        self._cell = max(20, min(48, 700 // self.grid_size))
         self._hud_h = 96
-        self._win_w = self._cell * 5
-        self._win_h = self._cell * 5 + self._hud_h
+        gs = self.grid_size
+        self._win_w = self._cell * gs
+        self._win_h = self._cell * gs + self._hud_h
         self._pygame = None
         self._window = None
         self._clock = None
@@ -76,11 +165,48 @@ class CustomGridTaxiEnv(gym.Env):
 
     # --- logika nagród / przejść (sucha wersja bez tabeli P) ---
 
+    def _is_open_cell(self, row: int, col: int) -> bool:
+        return (
+            0 <= row <= self.max_row
+            and 0 <= col <= self.max_col
+            and (row, col) not in self.blocked_cells
+        )
+
+    def _neighbors(self, row: int, col: int) -> list[tuple[int, int]]:
+        candidates = [
+            (row + 1, col),
+            (row - 1, col),
+            (row, col + 1),
+            (row, col - 1),
+        ]
+        return [(r, c) for r, c in candidates if self._is_open_cell(r, c)]
+
+    def _bfs_distances(self, target: tuple[int, int]) -> dict[tuple[int, int], int]:
+        distances = {target: 0}
+        queue: deque[tuple[int, int]] = deque([target])
+        while queue:
+            row, col = queue.popleft()
+            for nr, nc in self._neighbors(row, col):
+                if (nr, nc) not in distances:
+                    distances[(nr, nc)] = distances[(row, col)] + 1
+                    queue.append((nr, nc))
+        return distances
+
+    def _shortest_distance(self, start: tuple[int, int], target: tuple[int, int]) -> int:
+        return self._distance_maps[target][start]
+
+    def _sample_locations(self) -> list[tuple[int, int]]:
+        """Losuje cztery różne przystanki z wolnych pól mapy."""
+        if not self.randomize_locations:
+            return list(self.locs)
+        indices = self.np_random.choice(len(self._open_cells), size=4, replace=False)
+        return [self._open_cells[int(i)] for i in indices]
+
     def _pickup(
         self, taxi_loc: tuple[int, int], pass_idx: int, reward: float
     ) -> tuple[int, float]:
-        if pass_idx < 4 and taxi_loc == LOCS[pass_idx]:
-            return 4, reward
+        if pass_idx < 4 and taxi_loc == self.locs[pass_idx]:
+            return 4, 10.0
         return pass_idx, -10.0
 
     def _dropoff(
@@ -90,27 +216,49 @@ class CustomGridTaxiEnv(gym.Env):
         dest_idx: int,
         default_reward: float,
     ) -> tuple[int, float, bool]:
-        if taxi_loc == LOCS[dest_idx] and pass_idx == 4:
-            return dest_idx, 20.0, True
-        if taxi_loc in LOCS and pass_idx == 4:
-            return LOCS.index(taxi_loc), default_reward, False
+        if taxi_loc == self.locs[dest_idx] and pass_idx == 4:
+            return dest_idx, 100.0, True
         return pass_idx, -10.0, False
+
+    def _subgoal_rc(self, pass_idx: int, dest_idx: int) -> tuple[int, int]:
+        """Cel nawigacji: pasażer na przystanku (odbiór) albo miejsce dostawy."""
+        if pass_idx < 4:
+            return self.locs[pass_idx]
+        return self.locs[dest_idx]
 
     def _state_index(self) -> int:
         return int(
-            ((self.taxi_row * 5 + self.taxi_col) * 5 + self.passenger_idx) * 4
+            (
+                (self.taxi_row * self.grid_size + self.taxi_col) * 5
+                + self.passenger_idx
+            )
+            * 4
             + self.destination_idx
         )
 
     def _get_obs(self) -> int | np.ndarray:
         if self.observation_mode == "discrete":
             return self._state_index()
+        target_r, target_c = self._subgoal_rc(self.passenger_idx, self.destination_idx)
+        src_r, src_c = self.locs[self.passenger_start_idx]
+        dst_r, dst_c = self.locs[self.destination_idx]
+        passenger_state = 0.5 if self.passenger_idx == 4 else 0.0
+        bfs_distance = self._shortest_distance(
+            (self.taxi_row, self.taxi_col),
+            (target_r, target_c),
+        )
         return np.array(
             [
                 self.taxi_row / self.max_row,
                 self.taxi_col / self.max_col,
-                self.passenger_idx / 4.0,
-                self.destination_idx / 3.0,
+                passenger_state,
+                src_r / self.max_row,
+                src_c / self.max_col,
+                dst_r / self.max_row,
+                dst_c / self.max_col,
+                target_r / self.max_row,
+                target_c / self.max_col,
+                bfs_distance / self._max_bfs_distance,
             ],
             dtype=np.float32,
         )
@@ -118,19 +266,17 @@ class CustomGridTaxiEnv(gym.Env):
     def _action_mask(self) -> np.ndarray:
         mask = np.zeros(6, dtype=np.int8)
         r, c = self.taxi_row, self.taxi_col
-        if r < self.max_row:
+        if self._is_open_cell(r + 1, c):
             mask[0] = 1
-        if r > 0:
+        if self._is_open_cell(r - 1, c):
             mask[1] = 1
-        if c < self.max_col and self.desc[1 + r, 2 * c + 2] == b":":
+        if self._is_open_cell(r, c + 1):
             mask[2] = 1
-        if c > 0 and self.desc[1 + r, 2 * c] == b":":
+        if self._is_open_cell(r, c - 1):
             mask[3] = 1
-        if self.passenger_idx < 4 and (r, c) == LOCS[self.passenger_idx]:
+        if self.passenger_idx < 4 and (r, c) == self.locs[self.passenger_idx]:
             mask[4] = 1
-        if self.passenger_idx == 4 and (
-            (r, c) == LOCS[self.destination_idx] or (r, c) in LOCS
-        ):
+        if self.passenger_idx == 4 and (r, c) == self.locs[self.destination_idx]:
             mask[5] = 1
         return mask
 
@@ -145,11 +291,13 @@ class CustomGridTaxiEnv(gym.Env):
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
+        self.locs = self._sample_locations()
         self.passenger_idx = int(self.np_random.integers(0, 4))
+        self.passenger_start_idx = self.passenger_idx
         dest_choices = [d for d in range(4) if d != self.passenger_idx]
         self.destination_idx = int(self.np_random.choice(dest_choices))
-        self.taxi_row = int(self.np_random.integers(0, 5))
-        self.taxi_col = int(self.np_random.integers(0, 5))
+        taxi_cell = self._open_cells[int(self.np_random.integers(0, len(self._open_cells)))]
+        self.taxi_row, self.taxi_col = taxi_cell
         self.last_action = None
         self.steps = 0
         self.episode_reward = 0.0
@@ -161,19 +309,23 @@ class CustomGridTaxiEnv(gym.Env):
         p_idx, d_idx = self.passenger_idx, self.destination_idx
         new_row, new_col = row, col
         new_pass = p_idx
-        reward = -1.0
+        reward = -0.2
         terminated = False
+        old_target = self._subgoal_rc(p_idx, d_idx)
+        d_old = self._shortest_distance((row, col), old_target)
 
         if action == 0:
-            new_row = min(row + 1, self.max_row)
+            if self._is_open_cell(row + 1, col):
+                new_row = row + 1
         elif action == 1:
-            new_row = max(row - 1, 0)
+            if self._is_open_cell(row - 1, col):
+                new_row = row - 1
         elif action == 2:
-            if self.desc[1 + row, 2 * col + 2] == b":":
-                new_col = min(col + 1, self.max_col)
+            if self._is_open_cell(row, col + 1):
+                new_col = col + 1
         elif action == 3:
-            if self.desc[1 + row, 2 * col] == b":":
-                new_col = max(col - 1, 0)
+            if self._is_open_cell(row, col - 1):
+                new_col = col - 1
         elif action == 4:
             new_pass, reward = self._pickup((row, col), p_idx, reward)
         elif action == 5:
@@ -185,6 +337,12 @@ class CustomGridTaxiEnv(gym.Env):
         self.passenger_idx = new_pass
         self.last_action = action
         self.steps += 1
+
+        # Bonus za skrócenie najkrótszej ścieżki BFS do aktualnego celu.
+        if self.distance_bonus_scale > 0.0 and action in (0, 1, 2, 3):
+            d_new = self._shortest_distance((new_row, new_col), old_target)
+            reward += self.distance_bonus_scale * float(d_old - d_new)
+
         self.episode_reward += reward
 
         obs = self._get_obs()
@@ -225,12 +383,17 @@ class CustomGridTaxiEnv(gym.Env):
             self.passenger_idx,
             self.destination_idx,
         )
+        loc_names = ["R", "G", "Y", "B"]
+        for loc_i, (lr, lc) in enumerate(self.locs):
+            out[1 + lr][2 * lc + 1] = utils.colorize(
+                loc_names[loc_i], "cyan", bold=True
+            )
 
         if pass_idx < 4:
             out[1 + r][2 * c + 1] = utils.colorize(
                 out[1 + r][2 * c + 1], "yellow", highlight=True
             )
-            pi, pj = LOCS[pass_idx]
+            pi, pj = self.locs[pass_idx]
             out[1 + pi][2 * pj + 1] = utils.colorize(
                 out[1 + pi][2 * pj + 1], "blue", bold=True
             )
@@ -239,7 +402,7 @@ class CustomGridTaxiEnv(gym.Env):
                 ul(out[1 + r][2 * c + 1]), "green", highlight=True
             )
 
-        di, dj = LOCS[dest_idx]
+        di, dj = self.locs[dest_idx]
         out[1 + di][2 * dj + 1] = utils.colorize(out[1 + di][2 * dj + 1], "magenta")
 
         outfile.write("\n".join(["".join(row) for row in out]) + "\n")
@@ -292,54 +455,78 @@ class CustomGridTaxiEnv(gym.Env):
         }
         loc_names = ["R", "G", "Y", "B"]
 
-        canvas.fill((250, 250, 252))
+        canvas.fill((232, 238, 247))
 
-        grid_bg = (245, 245, 248)
-        grid_line = (215, 215, 220)
-        for r in range(5):
-            for c in range(5):
-                rect = pygame.Rect(c * cs, r * cs, cs, cs)
-                pygame.draw.rect(canvas, grid_bg, rect)
-                pygame.draw.rect(canvas, grid_line, rect, 1)
-
-        wall_color = (40, 40, 50)
+        grid_bg = (247, 249, 252)
+        grid_alt = (240, 244, 249)
+        grid_line = (211, 219, 231)
+        wall_color = (45, 53, 67)
+        wall_edge = (25, 30, 40)
         wall_w = 5
-        pygame.draw.rect(canvas, wall_color, (0, 0, self._win_w, cs * 5), wall_w)
-        for r in range(5):
-            for c in range(4):
+        gs = self.grid_size
+        for r in range(gs):
+            for c in range(gs):
+                rect = pygame.Rect(c * cs + 2, r * cs + 2, cs - 4, cs - 4)
+                if (r, c) in self.blocked_cells:
+                    pygame.draw.rect(canvas, wall_color, rect, border_radius=8)
+                    pygame.draw.rect(canvas, wall_edge, rect, 2, border_radius=8)
+                    brick_y = rect.y + rect.h // 2
+                    pygame.draw.line(
+                        canvas,
+                        (66, 76, 93),
+                        (rect.x + 6, brick_y),
+                        (rect.right - 6, brick_y),
+                        2,
+                    )
+                else:
+                    bg = grid_alt if (r + c) % 2 else grid_bg
+                    pygame.draw.rect(canvas, bg, rect, border_radius=7)
+                    pygame.draw.rect(canvas, grid_line, rect, 1, border_radius=7)
+
+        pygame.draw.rect(canvas, wall_color, (0, 0, self._win_w, cs * gs), wall_w)
+        for r in range(gs):
+            for c in range(gs - 1):
                 if self.desc[1 + r, 2 * c + 2] == b"|":
                     x = (c + 1) * cs
                     pygame.draw.line(
                         canvas, wall_color, (x, r * cs), (x, (r + 1) * cs), wall_w
                     )
 
-        for i, (lr, lc) in enumerate(LOCS):
+        for i, (lr, lc) in enumerate(self.locs):
             color = loc_colors[i]
             cx = lc * cs + cs // 2
             cy = lr * cs + cs // 2
-            pygame.draw.circle(canvas, color, (cx, cy), cs // 3, 4)
+            pad = max(5, cs // 7)
+            badge = pygame.Rect(lc * cs + pad, lr * cs + pad, cs - 2 * pad, cs - 2 * pad)
+            pygame.draw.rect(canvas, (255, 255, 255), badge, border_radius=12)
+            pygame.draw.rect(canvas, color, badge, 4, border_radius=12)
             label = self._fonts["big"].render(loc_names[i], True, color)
-            canvas.blit(label, (lc * cs + 8, lr * cs + 4))
+            canvas.blit(label, label.get_rect(center=badge.center))
 
-        dr, dc = LOCS[self.destination_idx]
-        goal_rect = pygame.Rect(dc * cs + 6, dr * cs + 6, cs - 12, cs - 12)
-        pygame.draw.rect(canvas, (170, 60, 200), goal_rect, 4, border_radius=10)
-        flag = self._fonts["small"].render("CEL", True, (170, 60, 200))
-        canvas.blit(flag, (dc * cs + cs - flag.get_width() - 8, dr * cs + cs - flag.get_height() - 6))
+        dr, dc = self.locs[self.destination_idx]
+        goal_rect = pygame.Rect(dc * cs + 5, dr * cs + 5, cs - 10, cs - 10)
+        pygame.draw.rect(canvas, (232, 209, 255), goal_rect, border_radius=14)
+        pygame.draw.rect(canvas, (152, 70, 215), goal_rect, 4, border_radius=14)
+        flag = self._fonts["small"].render("CEL", True, (92, 36, 150))
+        canvas.blit(flag, flag.get_rect(center=(goal_rect.centerx, goal_rect.bottom - 12)))
 
         if self.passenger_idx < 4:
-            pr, pc = LOCS[self.passenger_idx]
+            pr, pc = self.locs[self.passenger_idx]
             cx = pc * cs + cs // 2
             cy = pr * cs + cs // 2 + 8
-            pygame.draw.circle(canvas, (35, 35, 45), (cx, cy + 6), cs // 8)
-            pygame.draw.circle(canvas, (245, 220, 200), (cx, cy - 6), cs // 12)
-            pygame.draw.circle(canvas, (35, 35, 45), (cx, cy - 6), cs // 12, 2)
+            shadow = pygame.Rect(cx - cs // 5, cy + cs // 7, (2 * cs) // 5, cs // 8)
+            pygame.draw.ellipse(canvas, (170, 178, 188), shadow)
+            pygame.draw.circle(canvas, (36, 48, 64), (cx, cy + 5), cs // 8)
+            pygame.draw.circle(canvas, (247, 217, 190), (cx, cy - 7), cs // 11)
+            pygame.draw.circle(canvas, (36, 48, 64), (cx, cy - 7), cs // 11, 2)
 
         tr, tc = self.taxi_row, self.taxi_col
         pad = cs // 6
         taxi_rect = pygame.Rect(tc * cs + pad, tr * cs + pad, cs - 2 * pad, cs - 2 * pad)
         on_board = self.passenger_idx == 4
         body = (60, 200, 110) if on_board else (250, 200, 50)
+        shadow = taxi_rect.move(3, 4)
+        pygame.draw.rect(canvas, (150, 158, 170), shadow, border_radius=14)
         pygame.draw.rect(canvas, body, taxi_rect, border_radius=12)
         pygame.draw.rect(canvas, (30, 30, 35), taxi_rect, 2, border_radius=12)
         win_rect = pygame.Rect(
@@ -350,6 +537,11 @@ class CustomGridTaxiEnv(gym.Env):
         )
         pygame.draw.rect(canvas, (200, 230, 250), win_rect, border_radius=6)
         pygame.draw.rect(canvas, (30, 30, 35), win_rect, 2, border_radius=6)
+        wheel_r = max(3, cs // 12)
+        for wx in (taxi_rect.left + taxi_rect.w // 4, taxi_rect.right - taxi_rect.w // 4):
+            pygame.draw.circle(canvas, (25, 28, 35), (wx, taxi_rect.bottom - 3), wheel_r)
+        pygame.draw.circle(canvas, (255, 246, 160), (taxi_rect.left + 6, taxi_rect.centery), 3)
+        pygame.draw.circle(canvas, (255, 246, 160), (taxi_rect.right - 6, taxi_rect.centery), 3)
         t_label = self._fonts["mid"].render("TAXI", True, (30, 30, 35))
         canvas.blit(
             t_label,
@@ -358,9 +550,9 @@ class CustomGridTaxiEnv(gym.Env):
             ),
         )
 
-        hud = pygame.Rect(0, cs * 5, self._win_w, self._hud_h)
-        pygame.draw.rect(canvas, (28, 28, 36), hud)
-        pygame.draw.line(canvas, wall_color, (0, cs * 5), (self._win_w, cs * 5), wall_w)
+        hud = pygame.Rect(0, cs * gs, self._win_w, self._hud_h)
+        pygame.draw.rect(canvas, (28, 34, 48), hud)
+        pygame.draw.line(canvas, wall_color, (0, cs * gs), (self._win_w, cs * gs), wall_w)
 
         pass_state = (
             "pasażer: w taksówce"
@@ -368,15 +560,15 @@ class CustomGridTaxiEnv(gym.Env):
             else f"pasażer: {loc_names[self.passenger_idx]}"
         )
         action_names = ["South", "North", "East", "West", "Pickup", "Dropoff"]
-        last = action_names[self.last_action] if self.last_action is not None else "—"
+        last = action_names[self.last_action] if self.last_action is not None else "-"
         lines = [
-            f"{pass_state}    cel: {loc_names[self.destination_idx]}",
-            f"krok: {self.steps}    suma nagród: {self.episode_reward:.1f}",
+            f"{pass_state}    cel: {loc_names[self.destination_idx]}    mapa: {gs}x{gs}",
+            f"krok: {self.steps}    nagroda: {self.episode_reward:.1f}",
             f"ostatnia akcja: {last}",
         ]
         for i, text in enumerate(lines):
-            surf = self._fonts["small"].render(text, True, (235, 235, 240))
-            canvas.blit(surf, (12, cs * 5 + 8 + i * 22))
+            surf = self._fonts["small"].render(text, True, (238, 242, 248))
+            canvas.blit(surf, (12, cs * gs + 8 + i * 22))
 
         if self.render_mode == "human":
             pygame.display.flip()
@@ -393,7 +585,8 @@ def register_custom_grid_taxi() -> None:
     gym.register(
         id=ENV_ID,
         entry_point="custom_grid_taxi_env:CustomGridTaxiEnv",
-        max_episode_steps=200,
+        kwargs={"grid_size": DEFAULT_GRID_SIZE},
+        max_episode_steps=DEFAULT_MAX_EPISODE_STEPS,
     )
 
 
