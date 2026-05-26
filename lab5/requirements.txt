@@ -1,0 +1,10 @@
+gymnasium[box2d]==0.29.1
+stable-baselines3==2.3.2
+sb3-contrib==2.3.0
+torch>=2.2,<3
+numpy>=1.26,<2
+matplotlib>=3.8,<4
+pandas>=2.2,<3
+tensorboard>=2.14,<3
+pygame>=2.5,<3
+jupyterlab>=4.2,<5

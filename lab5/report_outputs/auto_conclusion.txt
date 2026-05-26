@@ -1,0 +1,10 @@
+Wyniki wskazują, że najlepszy końcowy rezultat osiągnął zestaw set_B.
+(średnia nagroda końcowa: 155.95 ± 53.51).
+Najsłabszy wynik uzyskał zestaw set_A.
+(średnia nagroda końcowa: 105.92 ± 82.70).
+
+Najbardziej stabilny przebieg miał zestaw set_C,
+natomiast największą zmienność pomiędzy uruchomieniami zaobserwowano dla set_A.
+
+Na tej podstawie można uznać, że zestaw set_B jest wyraźnie lepszy od set_A
+w analizowanej konfiguracji środowiska i budżetu treningowego.
